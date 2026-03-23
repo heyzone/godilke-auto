@@ -114,17 +114,28 @@ def ensure_server_online(page):
     """
     续期前检查服务器状态。
     若服务器处于 Offline 状态，则执行重启操作并等待其上线。
-    返回 True 表示服务器已在线或降级跳过，False 不使用（始终降级处理）。
+    所有异常均降级处理，不中断续期流程。
     """
     print("正在检查服务器运行状态...")
     try:
-        # 使用稳定的类名前缀匹配状态元素
         status_selector = '[class*="ServerConsole___StyledSpan4"]'
         page.wait_for_selector(status_selector, timeout=15000)
 
-        status_el = page.locator(status_selector).first
-        # 只取第一个直接文本节点，避免把运行时长也读进来
-        status_text = status_el.evaluate("el => el.childNodes[0].textContent.trim()")
+        # 等待 WebSocket 连接完成，状态从 Connecting... 变为真实状态
+        print("等待 WebSocket 连接完成...")
+        start_time = time.time()
+        while time.time() - start_time < 30:
+            status_text = page.locator(status_selector).first.evaluate(
+                "el => el.childNodes[0].textContent.trim()"
+            )
+            if status_text.lower() != "connecting...":
+                break
+            print(f"  WebSocket 连接中... ({int(time.time() - start_time)}s)")
+            time.sleep(2)
+        else:
+            print("⚠️  WebSocket 连接超时（30秒），跳过状态检查，继续执行续期。", flush=True)
+            return True
+
         print(f"当前服务器状态: {status_text}")
 
         if status_text.lower() == "offline":
@@ -148,7 +159,7 @@ def ensure_server_online(page):
                     "el => el.childNodes[0].textContent.trim()"
                 )
                 print(f"  重启中... 当前状态: {current_status}")
-                if current_status.lower() != "offline":
+                if current_status.lower() not in ("offline", "connecting..."):
                     print(f"✅ 服务器已恢复: {current_status}，继续执行续期。")
                     return True
 
