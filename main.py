@@ -23,7 +23,7 @@ if os.name != 'nt':
     signal.signal(signal.SIGALRM, timeout_handler)
 
 
-# ==================== 新增功能1：验证代理出口 IP ====================
+# ==================== 功能1：验证代理出口 IP ====================
 def verify_proxy_ip(page):
     """
     登录前访问 ipify 验证当前出口 IP，并打印出来。
@@ -45,7 +45,7 @@ def verify_proxy_ip(page):
         print(f"❌ 代理 IP 验证失败，无法访问 ipify: {e}", flush=True)
         page.screenshot(path="proxy_verify_error.png")
         return False
-# ==================================================================
+# ==============================================================
 
 
 def login_with_playwright(page):
@@ -64,7 +64,7 @@ def login_with_playwright(page):
         page.context.add_cookies([session_cookie])
         print(f"已设置 Cookie。正在访问目标服务器页面: {SERVER_URL}")
         page.goto(SERVER_URL, wait_until="domcontentloaded")
-        
+
         if "auth/login" in page.url:
             print("Cookie 登录失败或会话已过期，将回退到邮箱密码登录。")
             page.context.clear_cookies()
@@ -81,11 +81,11 @@ def login_with_playwright(page):
     try:
         print("正在点击 'Through login/password'...")
         page.locator('a:has-text("Through login/password")').click()
-        
+
         email_selector = 'input[name="username"]'
         password_selector = 'input[name="password"]'
         login_button_selector = 'button[type="submit"]:has-text("Login")'
-        
+
         print("等待登录表单元素加载...")
         page.wait_for_selector(email_selector)
         page.wait_for_selector(password_selector)
@@ -95,12 +95,12 @@ def login_with_playwright(page):
         print("正在点击登录按钮...")
         with page.expect_navigation(wait_until="domcontentloaded"):
             page.click(login_button_selector)
-        
+
         if "auth/login" in page.url:
             print("邮箱密码登录失败，请检查凭据是否正确。", flush=True)
             page.screenshot(path="login_fail_error.png")
             return False
-        
+
         print("邮箱密码登录成功！")
         return True
     except Exception as e:
@@ -109,79 +109,77 @@ def login_with_playwright(page):
         return False
 
 
-# ==================== 新增功能2：检查并处理 offline 状态 ====================
+# ==================== 功能2：检查并处理 offline 状态 ====================
 def ensure_server_online(page):
     """
     续期前检查服务器状态。
-    若服务器处于 offline 状态，则执行重启操作并等待其上线。
-    返回 True 表示服务器已在线，False 表示重启失败或超时。
+    若服务器处于 Offline 状态，则执行重启操作并等待其上线。
+    返回 True 表示服务器已在线或降级跳过，False 不使用（始终降级处理）。
     """
     print("正在检查服务器运行状态...")
     try:
-        # 等待状态指示元素出现（Pterodactyl 面板通常有状态徽章）
-        # 尝试匹配包含状态文字的元素，常见选择器如下，优先宽泛匹配
-        status_selector = '[class*="StatusText"], [class*="status"], .server-status, span:has-text("Offline"), span:has-text("Online"), span:has-text("Starting"), span:has-text("Stopping")'
+        # 使用稳定的类名前缀匹配状态元素
+        status_selector = '[class*="ServerConsole___StyledSpan4"]'
         page.wait_for_selector(status_selector, timeout=15000)
 
-        # 优先检查是否存在 "Offline" 文字元素
-        offline_locator = page.locator('span:has-text("Offline"), [class*="status"]:has-text("Offline")')
-        if offline_locator.count() > 0:
+        status_el = page.locator(status_selector).first
+        # 只取第一个直接文本节点，避免把运行时长也读进来
+        status_text = status_el.evaluate("el => el.childNodes[0].textContent.trim()")
+        print(f"当前服务器状态: {status_text}")
+
+        if status_text.lower() == "offline":
             print("⚠️  检测到服务器状态为 Offline，正在执行重启操作...")
 
-            # 点击重启按钮（Pterodactyl 面板重启按钮）
             restart_button_selector = 'button:has-text("Restart"), [aria-label*="Restart"], button[class*="restart"]'
             restart_locator = page.locator(restart_button_selector)
             if restart_locator.count() == 0:
-                print("❌ 未找到重启按钮，无法执行重启，将尝试直接续期。", flush=True)
-                return True  # 降级处理，继续尝试续期
+                print("❌ 未找到重启按钮，将尝试直接续期。", flush=True)
+                return True
 
             restart_locator.first.click()
             print("已点击重启按钮，等待服务器启动（最长等待 120 秒）...")
 
-            # 等待状态变为非 Offline（Online / Starting 均可接受）
             start_time = time.time()
             while time.time() - start_time < 120:
                 time.sleep(5)
                 page.reload(wait_until="domcontentloaded")
-                still_offline = page.locator('span:has-text("Offline"), [class*="status"]:has-text("Offline")')
-                if still_offline.count() == 0:
-                    print(f"✅ 服务器已离开 Offline 状态，继续执行续期。")
+                page.wait_for_selector(status_selector, timeout=15000)
+                current_status = page.locator(status_selector).first.evaluate(
+                    "el => el.childNodes[0].textContent.trim()"
+                )
+                print(f"  重启中... 当前状态: {current_status}")
+                if current_status.lower() != "offline":
+                    print(f"✅ 服务器已恢复: {current_status}，继续执行续期。")
                     return True
 
             print("❌ 等待服务器上线超时（120秒），将尝试直接续期。", flush=True)
             page.screenshot(path="restart_timeout_error.png")
-            return True  # 降级处理，继续尝试续期
+            return True
 
         else:
-            # 打印当前检测到的状态供日志参考
-            try:
-                status_text = page.locator('[class*="status"], span:has-text("Online"), span:has-text("Starting")').first.inner_text()
-                print(f"✅ 服务器状态正常: {status_text.strip()}，无需重启。")
-            except Exception:
-                print("✅ 未检测到 Offline 状态，服务器状态正常，无需重启。")
+            print(f"✅ 服务器状态正常: {status_text}，无需重启。")
             return True
 
     except PlaywrightTimeoutError:
         print("⚠️  状态元素未在规定时间内出现，跳过状态检查，继续执行续期。", flush=True)
-        return True  # 降级处理
+        return True
     except Exception as e:
         print(f"⚠️  检查服务器状态时发生错误: {e}，跳过状态检查，继续执行续期。", flush=True)
-        return True  # 降级处理
-# =========================================================================
+        return True
+# ======================================================================
 
 
 def add_time_task(page):
     """执行一次增加服务器时长的任务。"""
     try:
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始执行增加时长任务...")
-        
+
         if page.url != SERVER_URL:
             print(f"当前不在目标页面，正在导航至: {SERVER_URL}")
             page.goto(SERVER_URL, wait_until="domcontentloaded")
 
-        # ===== 新增：续期前确认服务器状态 =====
+        # 续期前确认服务器状态
         ensure_server_online(page)
-        # =====================================
 
         add_button_selector = 'button:has-text("Add 90 minutes")'
         print("步骤1: 查找并点击 'Add 90 minutes' 按钮...")
@@ -198,7 +196,7 @@ def add_time_task(page):
         print("步骤3: 开始固定等待2分钟...")
         time.sleep(120)
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ 已等待2分钟，默认任务完成。")
-        
+
         return True
 
     except PlaywrightTimeoutError as e:
@@ -217,7 +215,7 @@ def main():
     """
     print("启动自动化任务（单次运行, 固定等待模式）...", flush=True)
 
-    # ===== 新增：根据是否设置 SOCKS5_PROXY 决定是否启用代理 =====
+    # 根据是否设置 SOCKS5_PROXY 决定是否启用代理
     socks5_proxy = os.environ.get('SOCKS5_PROXY')
     launch_args = []
     if socks5_proxy:
@@ -227,7 +225,6 @@ def main():
         print(f"已启用 SOCKS5 代理，浏览器出口: {local_proxy}")
     else:
         print("未启用代理，使用 GitHub Actions 默认出口 IP。")
-    # ===========================================================
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=launch_args)
@@ -236,11 +233,10 @@ def main():
         print("浏览器启动成功。", flush=True)
 
         try:
-            # ===== 新增：登录前验证代理出口 IP =====
+            # 登录前验证代理出口 IP
             if not verify_proxy_ip(page):
                 print("代理 IP 验证失败，程序终止。", flush=True)
                 exit(1)
-            # =======================================
 
             # 步骤1: 登录
             if not login_with_playwright(page):
@@ -250,10 +246,10 @@ def main():
             # 步骤2: 执行增加时长的核心任务 (带超时监控)
             if os.name != 'nt':
                 signal.alarm(TASK_TIMEOUT_SECONDS)
-            
+
             print("\n----------------------------------------------------")
             success = add_time_task(page)
-            
+
             if os.name != 'nt':
                 signal.alarm(0)
 
