@@ -8,7 +8,6 @@ from datetime import datetime
 SERVER_URL = "https://panel.godlike.host/server/a4d1e2ec"
 LOGIN_URL = "https://panel.godlike.host/auth/login"
 COOKIE_NAME = "remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d"
-# 单次任务执行的超时时间（秒），依然保留以防单次运行卡死
 TASK_TIMEOUT_SECONDS = 300  # 5分钟
 
 # --- 超时处理机制 ---
@@ -23,7 +22,32 @@ def timeout_handler(signum, frame):
 if os.name != 'nt':
     signal.signal(signal.SIGALRM, timeout_handler)
 
-# login_with_playwright 函数保持不变，此处为完整代码
+
+# ==================== 新增功能1：验证代理出口 IP ====================
+def verify_proxy_ip(page):
+    """
+    登录前访问 ipify 验证当前出口 IP，并打印出来。
+    仅当设置了 SOCKS5_PROXY 环境变量时执行。
+    返回 True 表示验证通过（或未启用代理），False 表示获取 IP 失败。
+    """
+    socks5_proxy = os.environ.get('SOCKS5_PROXY')
+    if not socks5_proxy:
+        print("未设置 SOCKS5_PROXY，跳过代理 IP 验证，使用默认出口。")
+        return True
+
+    print("已启用 SOCKS5 代理，正在验证出口 IP...")
+    try:
+        page.goto("https://api.ipify.org?format=text", wait_until="domcontentloaded", timeout=20000)
+        current_ip = page.locator("body").inner_text().strip()
+        print(f"✅ 当前出口 IP 验证成功: {current_ip}")
+        return True
+    except Exception as e:
+        print(f"❌ 代理 IP 验证失败，无法访问 ipify: {e}", flush=True)
+        page.screenshot(path="proxy_verify_error.png")
+        return False
+# ==================================================================
+
+
 def login_with_playwright(page):
     """处理登录逻辑，优先使用Cookie，失败则使用邮箱密码。"""
     remember_web_cookie = os.environ.get('PTERODACTYL_COOKIE')
@@ -84,6 +108,68 @@ def login_with_playwright(page):
         page.screenshot(path="login_process_error.png")
         return False
 
+
+# ==================== 新增功能2：检查并处理 offline 状态 ====================
+def ensure_server_online(page):
+    """
+    续期前检查服务器状态。
+    若服务器处于 offline 状态，则执行重启操作并等待其上线。
+    返回 True 表示服务器已在线，False 表示重启失败或超时。
+    """
+    print("正在检查服务器运行状态...")
+    try:
+        # 等待状态指示元素出现（Pterodactyl 面板通常有状态徽章）
+        # 尝试匹配包含状态文字的元素，常见选择器如下，优先宽泛匹配
+        status_selector = '[class*="StatusText"], [class*="status"], .server-status, span:has-text("Offline"), span:has-text("Online"), span:has-text("Starting"), span:has-text("Stopping")'
+        page.wait_for_selector(status_selector, timeout=15000)
+
+        # 优先检查是否存在 "Offline" 文字元素
+        offline_locator = page.locator('span:has-text("Offline"), [class*="status"]:has-text("Offline")')
+        if offline_locator.count() > 0:
+            print("⚠️  检测到服务器状态为 Offline，正在执行重启操作...")
+
+            # 点击重启按钮（Pterodactyl 面板重启按钮）
+            restart_button_selector = 'button:has-text("Restart"), [aria-label*="Restart"], button[class*="restart"]'
+            restart_locator = page.locator(restart_button_selector)
+            if restart_locator.count() == 0:
+                print("❌ 未找到重启按钮，无法执行重启，将尝试直接续期。", flush=True)
+                return True  # 降级处理，继续尝试续期
+
+            restart_locator.first.click()
+            print("已点击重启按钮，等待服务器启动（最长等待 120 秒）...")
+
+            # 等待状态变为非 Offline（Online / Starting 均可接受）
+            start_time = time.time()
+            while time.time() - start_time < 120:
+                time.sleep(5)
+                page.reload(wait_until="domcontentloaded")
+                still_offline = page.locator('span:has-text("Offline"), [class*="status"]:has-text("Offline")')
+                if still_offline.count() == 0:
+                    print(f"✅ 服务器已离开 Offline 状态，继续执行续期。")
+                    return True
+
+            print("❌ 等待服务器上线超时（120秒），将尝试直接续期。", flush=True)
+            page.screenshot(path="restart_timeout_error.png")
+            return True  # 降级处理，继续尝试续期
+
+        else:
+            # 打印当前检测到的状态供日志参考
+            try:
+                status_text = page.locator('[class*="status"], span:has-text("Online"), span:has-text("Starting")').first.inner_text()
+                print(f"✅ 服务器状态正常: {status_text.strip()}，无需重启。")
+            except Exception:
+                print("✅ 未检测到 Offline 状态，服务器状态正常，无需重启。")
+            return True
+
+    except PlaywrightTimeoutError:
+        print("⚠️  状态元素未在规定时间内出现，跳过状态检查，继续执行续期。", flush=True)
+        return True  # 降级处理
+    except Exception as e:
+        print(f"⚠️  检查服务器状态时发生错误: {e}，跳过状态检查，继续执行续期。", flush=True)
+        return True  # 降级处理
+# =========================================================================
+
+
 def add_time_task(page):
     """执行一次增加服务器时长的任务。"""
     try:
@@ -92,6 +178,10 @@ def add_time_task(page):
         if page.url != SERVER_URL:
             print(f"当前不在目标页面，正在导航至: {SERVER_URL}")
             page.goto(SERVER_URL, wait_until="domcontentloaded")
+
+        # ===== 新增：续期前确认服务器状态 =====
+        ensure_server_online(page)
+        # =====================================
 
         add_button_selector = 'button:has-text("Add 90 minutes")'
         print("步骤1: 查找并点击 'Add 90 minutes' 按钮...")
@@ -105,10 +195,8 @@ def add_time_task(page):
         page.locator(watch_ad_selector).click()
         print("...已点击 'Watch advertisment'。")
 
-        # 【【【 核心修改点在这里 】】】
-        # 不再等待成功提示，而是直接固定等待2分钟。
         print("步骤3: 开始固定等待2分钟...")
-        time.sleep(120)  # 等待 2 分钟 (120 秒)
+        time.sleep(120)
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ 已等待2分钟，默认任务完成。")
         
         return True
@@ -122,18 +210,38 @@ def add_time_task(page):
         page.screenshot(path="task_general_error.png")
         return False
 
+
 def main():
     """
     主函数，执行一次登录和一次任务，然后退出。
     """
     print("启动自动化任务（单次运行, 固定等待模式）...", flush=True)
+
+    # ===== 新增：根据是否设置 SOCKS5_PROXY 决定是否启用代理 =====
+    socks5_proxy = os.environ.get('SOCKS5_PROXY')
+    launch_args = []
+    if socks5_proxy:
+        # gost 已在 yml 中将远程代理转发到本地 1080 端口
+        local_proxy = "socks5://127.0.0.1:1080"
+        launch_args = [f"--proxy-server={local_proxy}"]
+        print(f"已启用 SOCKS5 代理，浏览器出口: {local_proxy}")
+    else:
+        print("未启用代理，使用 GitHub Actions 默认出口 IP。")
+    # ===========================================================
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, args=launch_args)
         page = browser.new_page()
         page.set_default_timeout(60000)
         print("浏览器启动成功。", flush=True)
 
         try:
+            # ===== 新增：登录前验证代理出口 IP =====
+            if not verify_proxy_ip(page):
+                print("代理 IP 验证失败，程序终止。", flush=True)
+                exit(1)
+            # =======================================
+
             # 步骤1: 登录
             if not login_with_playwright(page):
                 print("登录失败，程序终止。", flush=True)
