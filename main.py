@@ -113,7 +113,7 @@ def login_with_playwright(page):
 def ensure_server_online(page):
     """
     续期前检查服务器状态。
-    若服务器处于 Offline 状态，则执行重启操作并等待其上线。
+    若服务器处于 Offline 状态，则点击 Start 按钮并等待其上线。
     所有异常均降级处理，不中断续期流程。
     """
     print("正在检查服务器运行状态...")
@@ -139,16 +139,20 @@ def ensure_server_online(page):
         print(f"当前服务器状态: {status_text}")
 
         if status_text.lower() == "offline":
-            print("⚠️  检测到服务器状态为 Offline，正在执行重启操作...")
+            print("⚠️  检测到服务器状态为 Offline，正在查找 Start 按钮...")
 
-            restart_button_selector = 'button:has-text("Restart"), [aria-label*="Restart"], button[class*="restart"]'
-            restart_locator = page.locator(restart_button_selector)
-            if restart_locator.count() == 0:
-                print("❌ 未找到重启按钮，将尝试直接续期。", flush=True)
+            # 精准匹配 Start 按钮，且必须是可点击状态（非 disabled）
+            start_button_selector = 'button:has-text("Start"):not([disabled])'
+
+            try:
+                # 等待 Start 按钮变为可点击状态，最长等待 10 秒
+                page.wait_for_selector(start_button_selector, timeout=10000)
+            except PlaywrightTimeoutError:
+                print("❌ 未找到可点击的 Start 按钮，将尝试直接续期。", flush=True)
                 return True
 
-            restart_locator.first.click()
-            print("已点击重启按钮，等待服务器启动（最长等待 120 秒）...")
+            page.locator(start_button_selector).click()
+            print("✅ 已点击 Start 按钮，等待服务器启动（最长等待 120 秒）...")
 
             start_time = time.time()
             while time.time() - start_time < 120:
@@ -158,7 +162,7 @@ def ensure_server_online(page):
                 current_status = page.locator(status_selector).first.evaluate(
                     "el => el.childNodes[0].textContent.trim()"
                 )
-                print(f"  重启中... 当前状态: {current_status}")
+                print(f"  启动中... 当前状态: {current_status}")
                 if current_status.lower() not in ("offline", "connecting..."):
                     print(f"✅ 服务器已恢复: {current_status}，继续执行续期。")
                     return True
@@ -168,7 +172,7 @@ def ensure_server_online(page):
             return True
 
         else:
-            print(f"✅ 服务器状态正常: {status_text}，无需重启。")
+            print(f"✅ 服务器状态正常: {status_text}，无需启动。")
             return True
 
     except PlaywrightTimeoutError:
@@ -230,7 +234,6 @@ def main():
     socks5_proxy = os.environ.get('SOCKS5_PROXY')
     launch_args = []
     if socks5_proxy:
-        # gost 已在 yml 中将远程代理转发到本地 1080 端口
         local_proxy = "socks5://127.0.0.1:1080"
         launch_args = [f"--proxy-server={local_proxy}"]
         print(f"已启用 SOCKS5 代理，浏览器出口: {local_proxy}")
