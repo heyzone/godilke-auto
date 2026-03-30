@@ -109,6 +109,7 @@ def ensure_server_online(page):
     """
     续期前检查服务器状态。
     若服务器处于 Offline 状态，则点击 Start 按钮并等待其上线。
+    Starting / Running 均视为正常状态。
     所有异常均降级处理，不中断续期流程。
     """
     print("正在检查服务器运行状态...")
@@ -116,7 +117,6 @@ def ensure_server_online(page):
         status_selector = '[class*="ServerConsole___StyledSpan4"]'
         page.wait_for_selector(status_selector, timeout=15000)
 
-        # 等待 WebSocket 连接完成，状态从 Connecting... 变为真实状态
         print("等待 WebSocket 连接完成...")
         start_time = time.time()
         while time.time() - start_time < 30:
@@ -136,7 +136,6 @@ def ensure_server_online(page):
         if status_text.lower() == "offline":
             print("⚠️  检测到服务器状态为 Offline，正在查找 Start 按钮...")
 
-            # ✅ 使用精确匹配，避免同时匹配到 "Restart" 按钮
             start_button = page.get_by_role("button", name="Start", exact=True)
 
             try:
@@ -148,16 +147,26 @@ def ensure_server_online(page):
             start_button.click()
             print("✅ 已点击 Start 按钮，等待服务器启动（最长等待 120 秒）...")
 
-            start_time = time.time()
-            while time.time() - start_time < 120:
+            boot_start = time.time()
+            while time.time() - boot_start < 120:
                 time.sleep(5)
                 page.reload(wait_until="domcontentloaded")
                 page.wait_for_selector(status_selector, timeout=15000)
-                current_status = page.locator(status_selector).first.evaluate(
-                    "el => el.childNodes[0].textContent.trim()"
-                )
+
+                # reload 后等待 WebSocket 稳定，避免永远读到 "Connecting..."
+                ws_wait_start = time.time()
+                while time.time() - ws_wait_start < 20:
+                    current_status = page.locator(status_selector).first.evaluate(
+                        "el => el.childNodes[0].textContent.trim()"
+                    )
+                    if current_status.lower() != "connecting...":
+                        break
+                    time.sleep(2)
+
                 print(f"  启动中... 当前状态: {current_status}")
-                if current_status.lower() not in ("offline", "connecting..."):
+
+                # offline 才继续等待，其余状态（starting / running 等）均视为正常
+                if current_status.lower() != "offline":
                     print(f"✅ 服务器已恢复: {current_status}，继续执行续期。")
                     return True
 
