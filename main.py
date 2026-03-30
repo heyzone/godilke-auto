@@ -25,11 +25,6 @@ if os.name != 'nt':
 
 # ==================== 功能1：验证代理出口 IP ====================
 def verify_proxy_ip(page):
-    """
-    登录前访问 ipify 验证当前出口 IP，并打印出来。
-    仅当设置了 SOCKS5_PROXY 环境变量时执行。
-    返回 True 表示验证通过（或未启用代理），False 表示获取 IP 失败。
-    """
     socks5_proxy = os.environ.get('SOCKS5_PROXY')
     if not socks5_proxy:
         print("未设置 SOCKS5_PROXY，跳过代理 IP 验证，使用默认出口。")
@@ -141,17 +136,16 @@ def ensure_server_online(page):
         if status_text.lower() == "offline":
             print("⚠️  检测到服务器状态为 Offline，正在查找 Start 按钮...")
 
-            # 精准匹配 Start 按钮，且必须是可点击状态（非 disabled）
-            start_button_selector = 'button:has-text("Start"):not([disabled])'
+            # ✅ 使用精确匹配，避免同时匹配到 "Restart" 按钮
+            start_button = page.get_by_role("button", name="Start", exact=True)
 
             try:
-                # 等待 Start 按钮变为可点击状态，最长等待 10 秒
-                page.wait_for_selector(start_button_selector, timeout=10000)
+                start_button.wait_for(state='visible', timeout=10000)
             except PlaywrightTimeoutError:
                 print("❌ 未找到可点击的 Start 按钮，将尝试直接续期。", flush=True)
                 return True
 
-            page.locator(start_button_selector).click()
+            start_button.click()
             print("✅ 已点击 Start 按钮，等待服务器启动（最长等待 120 秒）...")
 
             start_time = time.time()
@@ -230,7 +224,6 @@ def main():
     """
     print("启动自动化任务（单次运行, 固定等待模式）...", flush=True)
 
-    # 根据是否设置 SOCKS5_PROXY 决定是否启用代理
     socks5_proxy = os.environ.get('SOCKS5_PROXY')
     launch_args = []
     if socks5_proxy:
@@ -247,17 +240,14 @@ def main():
         print("浏览器启动成功。", flush=True)
 
         try:
-            # 登录前验证代理出口 IP
             if not verify_proxy_ip(page):
                 print("代理 IP 验证失败，程序终止。", flush=True)
                 exit(1)
 
-            # 步骤1: 登录
             if not login_with_playwright(page):
                 print("登录失败，程序终止。", flush=True)
                 exit(1)
 
-            # 步骤2: 执行增加时长的核心任务 (带超时监控)
             if os.name != 'nt':
                 signal.alarm(TASK_TIMEOUT_SECONDS)
 
